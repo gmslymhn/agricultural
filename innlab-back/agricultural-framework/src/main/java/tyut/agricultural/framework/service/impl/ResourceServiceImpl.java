@@ -1,0 +1,293 @@
+package tyut.agricultural.framework.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+import tyut.agricultural.common.utils.*;
+import tyut.agricultural.framework.domain.entity.ResourceEntity;
+import tyut.agricultural.common.constant.KeyConstants;
+import tyut.agricultural.common.domain.R;
+import tyut.agricultural.framework.domain.dto.param.ResourceParam;
+import tyut.agricultural.framework.domain.vo.CookieVo;
+import tyut.agricultural.framework.domain.vo.ResourceVo;
+import tyut.agricultural.framework.mapper.ResourceMapper;
+import tyut.agricultural.framework.service.IResourceService;
+import tyut.agricultural.common.domain.Lz;
+import tyut.agricultural.framework.web.SecurityUtils;
+
+import java.io.*;
+import java.util.Base64;
+import java.util.Date;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * @ClassName: ResourceServiceImpl
+ * @Description:
+ * @Author: gmslymhn
+ * @CreateTime: 2024-05-23 16:04
+ * @Version: 1.0
+ **/
+@Service
+public class ResourceServiceImpl implements IResourceService {
+    @Autowired
+    private ResourceMapper resourceMapper;
+    @Autowired
+    private RedisUtils redisUtils;
+
+    private static String resourcePath = "agricultural-resources/";
+
+    /**
+     * 添加资源（添加资源为文件）
+     *
+     * @param file
+     * @param type
+     * @return
+     */
+    @Override
+    public R addResource(MultipartFile file, String fileDescription,Integer type) {
+        String fileName = file.getOriginalFilename();
+        //获取文件后缀名
+        String suffixName = fileName.substring(fileName.lastIndexOf("."));
+        String imagePath = null;
+        if (type==1 && (suffixName.equals(".jpg") || suffixName.equals(".png"))) {
+            imagePath = "Image/";
+        } else if (type==2 && suffixName.equals(".mp4")) {
+            imagePath = "Video/";
+        } else {
+            return R.error("文件格式错误！");
+        }
+        //重新生成文件名
+        Date date = new Date();
+        String fileName1 = DateUtils.format(date) + RandomUtils.createCode(5);
+        String fileName2 = fileName1 + suffixName;
+        try {
+            BufferedOutputStream out = new BufferedOutputStream(
+                    new FileOutputStream(new File(resourcePath + imagePath + fileName2)));
+            out.write(file.getBytes());
+            out.flush();
+            out.close();
+            ResourceEntity resourceEntity = new ResourceEntity();
+            resourceEntity.setResourcePath(imagePath + fileName2);
+            resourceEntity.setResourceName(fileName1);
+            resourceEntity.setResourceType(type);
+            resourceEntity.setDelFlag(0);
+            resourceEntity.setResourceDescription(fileDescription);
+            resourceEntity.setCreateUser(SecurityUtils.getUserNickName());
+            resourceMapper.insert(resourceEntity);
+            QueryWrapper<ResourceEntity> queryWrapper = new QueryWrapper<>();
+            queryWrapper.eq("resource_path", resourceEntity.getResourcePath());
+            ResourceEntity resourceEntity1 =resourceMapper.selectOne(queryWrapper);
+            R r = addResourceForCloud(resourceEntity.getResourceId());
+            if (r.getCode()!=200){
+                return r;
+            }
+            ResourceEntity resourceEntity2 = resourceMapper.selectById(resourceEntity1.getResourceId());
+            ResourceVo resourceVo = new ResourceVo(resourceEntity2);
+            return R.success(resourceVo);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return R.error("添加图片失败！");
+        }
+    }
+    @Override
+    public R addResource2(MultipartFile file, String fileDescription, Integer type) {
+        String fileName = file.getOriginalFilename();
+        //获取文件后缀名
+        String suffixName = fileName.substring(fileName.lastIndexOf("."));
+        String imagePath = null;
+        if (type==3) {
+            imagePath = "Cache/";
+        } else {
+            return R.error("文件格式错误！");
+        }
+        //重新生成文件名
+        Date date = new Date();
+        String fileName1 = DateUtils.format(date) + RandomUtils.createCode(5);
+//        String fileName2 = fileName1 + suffixName;
+        String fileName2 = fileName;
+        try {
+            BufferedOutputStream out = new BufferedOutputStream(
+                    new FileOutputStream(new File(resourcePath + imagePath + fileName2)));
+            out.write(file.getBytes());
+            out.flush();
+            out.close();
+            ResourceEntity resourceEntity = new ResourceEntity();
+            resourceEntity.setResourcePath(imagePath + fileName2);
+            resourceEntity.setResourceName(fileName1);
+            resourceEntity.setResourceType(type);
+            resourceEntity.setDelFlag(0);
+            resourceEntity.setResourceDescription(fileDescription);
+            resourceEntity.setCreateUser(SecurityUtils.getUserNickName());
+            resourceMapper.insert(resourceEntity);
+            QueryWrapper<ResourceEntity> queryWrapper = new QueryWrapper<>();
+            queryWrapper.eq("resource_path", resourceEntity.getResourcePath());
+            ResourceEntity resourceEntity1 =resourceMapper.selectOne(queryWrapper);
+            R r = addResourceForCloud2(resourceEntity.getResourceId());
+            if (r.getCode()!=200){
+                return r;
+            }
+            ResourceEntity resourceEntity2 = resourceMapper.selectById(resourceEntity1.getResourceId());
+            ResourceVo resourceVo = new ResourceVo(resourceEntity2);
+            return R.success(resourceVo);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return R.error("添加图片失败！");
+        }
+    }
+
+    @Override
+    public R addResourceForCloud(Integer resourceId) {
+        ResourceEntity resourceEntity = resourceMapper.selectById(resourceId);
+        if (StringUtils.isEmpty(resourceEntity.getResourcePath())) {
+            return R.error("文件不存在！");
+        }
+        try {
+            BufferedInputStream in = new BufferedInputStream(new FileInputStream(resourcePath + resourceEntity.getResourcePath()));
+            byte[] fileData = new byte[0];
+            fileData = in.readAllBytes();
+            BufferedOutputStream out = new BufferedOutputStream(
+                    new FileOutputStream(new File(resourcePath+"Cache/" + resourceEntity.getResourcePath() + ".it")));
+            out.write(fileData);
+            out.flush();
+            out.close();
+            if (redisUtils.hasKey("Resource_Cookie") && redisUtils.hasKey("Resource_Folder_Id")) {
+                File file = new File(resourcePath+"Cache/" + resourceEntity.getResourcePath() + ".it");
+                Lz lz = FigureBedUtils.addLz(file, redisUtils.getCacheObject("Resource_Cookie").toString(), redisUtils.getCacheObject("Resource_Folder_Id").toString());
+                resourceEntity.setFId(lz.getFId());
+                resourceEntity.setIsNewd(lz.getIsNewd());
+                resourceEntity.setPwd(lz.getPwd());
+                resourceMapper.updateById(resourceEntity);
+            } else {
+                return R.error("请上传蓝奏云Cookie");
+            }
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return R.success();
+    }
+
+    @Override
+    public R addResourceForCloud2(Integer resourceId) {
+        ResourceEntity resourceEntity = resourceMapper.selectById(resourceId);
+        if (StringUtils.isEmpty(resourceEntity.getResourcePath())) {
+            return R.error("文件不存在！");
+        }
+        try {
+            if (redisUtils.hasKey("Resource_Cookie") && redisUtils.hasKey("Resource_Folder_Id")) {
+                File file = new File(resourcePath + resourceEntity.getResourcePath());
+                Lz lz = FigureBedUtils.addLz(file, redisUtils.getCacheObject("Resource_Cookie").toString(), redisUtils.getCacheObject("Resource_Folder_Id").toString());
+                resourceEntity.setFId(lz.getFId());
+                resourceEntity.setIsNewd(lz.getIsNewd());
+                resourceEntity.setPwd(lz.getPwd());
+                resourceMapper.updateById(resourceEntity);
+            } else {
+                return R.error("请上传蓝奏云Cookie");
+            }
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return R.success();
+    }
+    @Override
+    public R cacheCookie(CookieVo cookieVo){
+        redisUtils.setCacheObject("Resource_Cookie",cookieVo.getCookie());
+        redisUtils.setCacheObject("Resource_Folder_Id",cookieVo.getFolderId());
+        return R.success("上传成功！");
+    }
+    @Override
+    public R getResourceLz(Integer resourceId){
+        ResourceEntity resourceEntity = resourceMapper.selectById(resourceId);
+        if (ObjectUtils.isNotNull(resourceEntity)&&ObjectUtils.isNotNull(resourceEntity.getFId())){
+            Lz lz = new Lz(resourceEntity.getPwd(),resourceEntity.getFId(),resourceEntity.getIsNewd());
+            return R.success(lz);
+        }else {
+            return R.error("文件蓝奏云资源不存在！");
+        }
+    }
+    @Override
+    public R getResourcelist(ResourceParam resourceParam){
+        Page<ResourceEntity> page = new Page<>(resourceParam.getPageNum(),resourceParam.getPageSize());
+        QueryWrapper<ResourceEntity> queryWrapper = new QueryWrapper<>();
+        queryWrapper.eq(ObjectUtils.isNotNull(resourceParam.getResourceType()),"resource_type",resourceParam.getResourceType())
+                .orderByDesc("resource_id");
+        IPage<ResourceEntity> resourceEntityIPage = resourceMapper.selectPage(page, queryWrapper);
+        resourceEntityIPage.getRecords().forEach( resourceEntity -> {
+            String lzLinkUrl = (String) redisUtils.getCacheObject(KeyConstants.LZ_LINEURL_KEY+resourceEntity.getFId());
+            if (StringUtils.isNotEmpty(lzLinkUrl)){
+                resourceEntity.setResourceUrl(lzLinkUrl);
+            }
+        });
+        return R.success(resourceEntityIPage);
+    }
+
+    @Async
+    @Override
+    public CompletableFuture<String> getResourceByLz(Lz lz){
+        String lineUrl = null;
+        String lzKey = KeyConstants.LZ_LINEURL_KEY + lz.getFId();
+        if (redisUtils.hasKey(lzKey)) {
+            lineUrl = (String) redisUtils.getCacheObject(lzKey);
+            if (StringUtils.isNotBlank(lineUrl)){
+                return CompletableFuture.completedFuture(lineUrl);
+            }
+        }
+
+        return CompletableFuture.supplyAsync(() -> {
+            String newLineUrl = FigureBedUtils.getLz(lz);
+            if (StringUtils.isEmpty(newLineUrl)){
+                return "https://picabstract-preview-ftn.weiyun.com/ftn_pic_abs_v3/f3be25102f2afcbceaadd64f56fafd5d6ab12cca4f192576264076015041801db06736e672fde394c5fc6a7d9558e197?pictype=scale&from=30013&version=3.3.3.3&fname=5e74a7832ff411f18ee66c4e542b2647.jpg&size=750";
+            }
+            redisUtils.setCacheObject(lzKey, newLineUrl, 30, TimeUnit.MINUTES);
+            return newLineUrl;
+        });
+    }
+
+    @Override
+    public R getResourceByLz2(Lz lz){
+        String lineUrl = null;
+        String lzKey = KeyConstants.LZ_LINEURL_KEY + lz.getFId();
+        if (redisUtils.hasKey(lzKey)) {
+            lineUrl = (String) redisUtils.getCacheObject(lzKey);
+            if (StringUtils.isNotBlank(lineUrl)){
+                return R.success(lineUrl);
+            }
+        }
+
+        String newLineUrl = FigureBedUtils.getLz(lz);
+        redisUtils.setCacheObject(lzKey, newLineUrl, 30, TimeUnit.MINUTES);
+        return R.success(lineUrl);
+    }
+    public R getResourceBase64(Integer resourceId){
+        ResourceEntity resourceEntity = resourceMapper.selectById(resourceId);
+        if (ObjectUtils.isNotNull(resourceEntity)&&ObjectUtils.isNotNull(resourceEntity.getResourcePath())){
+            String base64 = null;
+            if (resourceEntity.getResourceType()==3){
+
+                try (BufferedInputStream in = new BufferedInputStream(new FileInputStream("selab-resources/"+resourceEntity.getResourcePath()))) {
+                    byte[] fileData = new byte[0];
+                    fileData = in.readAllBytes();
+                    // 处理文件内容，例如显示或保存文件内容
+                    base64 = Base64.getEncoder().encodeToString(fileData);
+                }catch (IOException e) {
+                    // 处理异常
+                    e.printStackTrace();
+                }
+            }else {
+                return R.error("文件不支持Base64");
+            }
+            return R.success(base64);
+        }else {
+            return R.error("文件资源不存在！");
+        }
+    }
+
+}
